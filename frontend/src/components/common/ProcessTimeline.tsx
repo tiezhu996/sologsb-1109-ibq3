@@ -39,10 +39,12 @@ export default function ProcessTimeline({ batches, herbs, methods, limit = 6 }: 
               <Tag style={{ marginLeft: 8 }} color={DEGREE_COLOR[batch.degree]}>
                 {batch.degree}
               </Tag>
+              <Tag color="geekblue">{batch.potCount} 锅</Tag>
+              {batch.reworkCount > 0 ? <Tag color="purple">返工 {batch.reworkCount}</Tag> : null}
               {batch.locked ? <Tag color="blue">已锁定</Tag> : <Tag>待判定</Tag>}
               <div style={{ fontSize: 12, color: '#6b7a70' }}>
                 {herb?.name ?? '未知药材'} · {method?.name ?? '未知方法'} · {batch.fireLevel} ·{' '}
-                {formatDate(batch.startedAt)} · 得率 {batch.yieldRate}% · 操作人 {batch.operator}
+                {formatDate(batch.startedAt)} · 总投料 {batch.feedKg}kg / 总产出 {batch.outputKg}kg · 得率 {batch.yieldRate}% · 操作人 {batch.operator}
               </div>
             </div>
           ),

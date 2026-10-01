@@ -35,7 +35,10 @@ export default function ProcessBoard() {
 
   const avgYield = useMemo(() => {
     if (batches.length === 0) return 0;
-    return Number((batches.reduce((sum, b) => sum + b.yieldRate, 0) / batches.length).toFixed(1));
+    // 与锅次同源口径一致：总产出 ÷ 总投料（不逐批平均）
+    const totalFeed = batches.reduce((sum, b) => sum + b.feedKg, 0);
+    const totalOutput = batches.reduce((sum, b) => sum + b.outputKg, 0);
+    return totalFeed > 0 ? Number(((totalOutput / totalFeed) * 100).toFixed(1)) : 0;
   }, [batches]);
 
   const herbName = (id: string) => herbs.find((h) => h.id === id)?.name ?? '未知药材';
@@ -45,8 +48,19 @@ export default function ProcessBoard() {
     { title: '生产批号', dataIndex: 'batchNo', width: 130, render: (v: string) => <Text strong>{v}</Text> },
     { title: '药材', dataIndex: 'herbId', width: 100, render: (id: string) => herbName(id) },
     { title: '炮制方法', dataIndex: 'methodId', width: 100, render: (id: string) => methodName(id) },
-    { title: '投料量(kg)', dataIndex: 'feedKg', width: 100, align: 'right' },
-    { title: '辅料用量(kg)', dataIndex: 'auxUsedKg', width: 110, align: 'right' },
+    {
+      title: '锅次',
+      width: 90,
+      render: (_, b) => (
+        <Space size={2}>
+          <Tag color="geekblue">{b.potCount} 锅</Tag>
+          {b.reworkCount > 0 ? <Tag color="purple">返工 {b.reworkCount}</Tag> : null}
+        </Space>
+      ),
+    },
+    { title: '总投料量(kg)', dataIndex: 'feedKg', width: 110, align: 'right' },
+    { title: '总辅料(kg)', dataIndex: 'auxUsedKg', width: 100, align: 'right' },
+    { title: '总产出(kg)', dataIndex: 'outputKg', width: 100, align: 'right' },
     {
       title: '得率(%)',
       dataIndex: 'yieldRate',
@@ -156,7 +170,7 @@ export default function ProcessBoard() {
               columns={pendingColumns}
               dataSource={pending}
               pagination={{ pageSize: 6, hideOnSinglePage: true }}
-              scroll={{ x: 900 }}
+              scroll={{ x: 1120 }}
             />
           </Card>
         </Col>

@@ -1,8 +1,9 @@
 import { db } from './db';
 import { HERB_ORIGINS, type HerbMaterial } from '../types/herb-material';
 import { METHOD_NAMES, type ProcessingMethod } from '../types/processing-method';
-import type { ProcessBatch } from '../types/process-batch';
+import type { ProcessBatch, ProcessDegree, ProcessPot } from '../types/process-batch';
 import { CABINETS, type RetainSample } from '../types/retain-sample';
+import { summarizePots } from './pots';
 import { judgeDegree, expectedYieldOf } from './degree';
 
 /** 首次打开时写入的示例台账，便于直接查看各页面效果 */
@@ -34,60 +35,132 @@ export const SEED_METHODS: ProcessingMethod[] = [
   { id: 'method-012', name: '酒炙', auxiliary: '黄酒', auxRatio: 15, fireLevel: '文火', tempRange: [100, 130], duration: 18, criterion: '酒气尽、断面棕褐、色泽均匀', criterionDimension: '断面', applicable: '川芎（派生）', derivedFrom: 'method-003' },
 ];
 
+interface SeedPlan {
+  batchNo: string;
+  herbId: string;
+  methodId: string;
+  /** 各正常锅投料量（锅容量 100kg，超出的批次拆锅） */
+  feeds: number[];
+  duration: number;
+  fireLevel: ProcessBatch['fireLevel'];
+  operator: string;
+  remark: string;
+  /** 返工锅：[来源锅序号（0 基）, 投料kg] */
+  rework?: [number, number];
+}
+
+const SEED_PLANS: SeedPlan[] = [
+  { batchNo: 'PZ-25081', herbId: 'herb-001', methodId: 'method-002', feeds: [80, 40], duration: 10, fireLevel: '中火', operator: '陈玉兰', remark: '麸炒白术' },
+  { batchNo: 'PZ-25082', herbId: 'herb-002', methodId: 'method-003', feeds: [80], duration: 15, fireLevel: '文火', operator: '陈玉兰', remark: '酒炙白芍' },
+  { batchNo: 'PZ-25083', herbId: 'herb-003', methodId: 'method-003', feeds: [60], duration: 15, fireLevel: '文火', operator: '刘建国', remark: '酒炙当归，首锅色泽不及返酒复炙', rework: [0, 5] },
+  { batchNo: 'PZ-25084', herbId: 'herb-004', methodId: 'method-001', feeds: [45], duration: 12, fireLevel: '文火', operator: '刘建国', remark: '清炒陈皮' },
+  { batchNo: 'PZ-25085', herbId: 'herb-005', methodId: 'method-006', feeds: [100, 100], duration: 16, fireLevel: '中火', operator: '王丽', remark: '蜜炙黄芪' },
+  { batchNo: 'PZ-25086', herbId: 'herb-006', methodId: 'method-010', feeds: [100, 50], duration: 45, fireLevel: '武火', operator: '王丽', remark: '煅牡蛎' },
+  { batchNo: 'PZ-25087', herbId: 'herb-008', methodId: 'method-005', feeds: [90], duration: 12, fireLevel: '文火', operator: '陈玉兰', remark: '盐炙杜仲' },
+  { batchNo: 'PZ-25088', herbId: 'herb-009', methodId: 'method-001', feeds: [55], duration: 12, fireLevel: '文火', operator: '刘建国', remark: '清炒桑叶' },
+  { batchNo: 'PZ-25089', herbId: 'herb-010', methodId: 'method-006', feeds: [100, 30], duration: 16, fireLevel: '中火', operator: '王丽', remark: '蜜炙甘草' },
+  { batchNo: 'PZ-25090', herbId: 'herb-007', methodId: 'method-002', feeds: [12], duration: 10, fireLevel: '中火', operator: '王丽', remark: '麸炒全蝎' },
+];
+
 function isoMinutesAgo(minutes: number): string {
   return new Date(Date.now() - minutes * 60_000).toISOString();
 }
 
-function buildSeedBatches(): ProcessBatch[] {
-  const plan: Array<[string, string, string, number, number, number, string, string, string]> = [
-    // batchNo, herbId, methodId, feedKg, auxUsedKg, durationMin, fireLevel, operator, remark
-    ['PZ-25081', 'herb-001', 'method-002', 120, 12, 10, '中火', '陈玉兰', '麸炒白术'],
-    ['PZ-25082', 'herb-002', 'method-003', 80, 8, 15, '文火', '陈玉兰', '酒炙白芍'],
-    ['PZ-25083', 'herb-003', 'method-003', 60, 6, 15, '文火', '刘建国', '酒炙当归'],
-    ['PZ-25084', 'herb-004', 'method-001', 45, 0, 12, '文火', '刘建国', '清炒陈皮'],
-    ['PZ-25085', 'herb-005', 'method-006', 200, 50, 16, '中火', '王丽', '蜜炙黄芪'],
-    ['PZ-25086', 'herb-006', 'method-010', 150, 0, 45, '武火', '王丽', '煅牡蛎'],
-    ['PZ-25087', 'herb-008', 'method-005', 90, 1.8, 12, '文火', '陈玉兰', '盐炙杜仲'],
-    ['PZ-25088', 'herb-009', 'method-001', 55, 0, 12, '文火', '刘建国', '清炒桑叶'],
-    ['PZ-25089', 'herb-010', 'method-006', 130, 32.5, 16, '中火', '王丽', '蜜炙甘草'],
-    ['PZ-25090', 'herb-007', 'method-002', 12, 1.2, 10, '中火', '王丽', '麸炒全蝎'],
-  ];
+/** 生成批次与其锅次（总量/得率为锅次派生快照） */
+function buildSeedBatchesAndPots(): { batches: ProcessBatch[]; pots: ProcessPot[] } {
+  const batches: ProcessBatch[] = [];
+  const pots: ProcessPot[] = [];
 
-  return plan.map(([batchNo, herbId, methodId, feedKg, auxUsedKg, duration, fireLevel, operator, remark], index) => {
-    const method = SEED_METHODS.find((m) => m.id === methodId)!;
-    const endedAt = isoMinutesAgo(45 * (index + 1));
-    const startedAt = new Date(new Date(endedAt).getTime() - duration * 60_000).toISOString();
-    const yieldRate = Number((expectedYieldOf(method) + ((index % 5) - 2) * 0.8).toFixed(1));
+  SEED_PLANS.forEach((plan, index) => {
+    const method = SEED_METHODS.find((m) => m.id === plan.methodId)!;
+    const batchId = `batch-${String(index + 1).padStart(3, '0')}`;
+    const expected = expectedYieldOf(method);
+    // 各锅结束时间顺序排开
+    const endBase = Date.now() - 45 * (index + 1) * 60_000;
+
+    const normalPots: ProcessPot[] = plan.feeds.map((feed, potIndex) => {
+      const yieldBias = (((index + potIndex) % 5) - 2) * 0.8;
+      const output = Number((feed * ((expected + yieldBias) / 100)).toFixed(3));
+      const endedAt = new Date(endBase - potIndex * (plan.duration + 5) * 60_000).toISOString();
+      const startedAt = new Date(new Date(endedAt).getTime() - plan.duration * 60_000).toISOString();
+      return {
+        id: `${batchId}-pot-${String(potIndex + 1).padStart(2, '0')}`,
+        batchId,
+        potNo: potIndex + 1,
+        kind: 'normal' as const,
+        feedKg: feed,
+        auxUsedKg: Number(((feed * method.auxRatio) / 100).toFixed(3)),
+        outputKg: output,
+        startedAt,
+        endedAt,
+        operator: plan.operator,
+        sampled: false,
+      };
+    });
+
+    let allPots = [...normalPots];
+    if (plan.rework) {
+      const [sourceIndex, reworkFeed] = plan.rework;
+      const source = normalPots[sourceIndex];
+      const endedAt = new Date(new Date(source.endedAt).getTime() + 25 * 60_000).toISOString();
+      const startedAt = new Date(new Date(endedAt).getTime() - plan.duration * 60_000).toISOString();
+      allPots.push({
+        id: `${batchId}-pot-rw01`,
+        batchId,
+        potNo: 1,
+        kind: 'rework',
+        sourcePotId: source.id,
+        feedKg: reworkFeed,
+        auxUsedKg: Number(((reworkFeed * method.auxRatio) / 100).toFixed(3)),
+        outputKg: Number((reworkFeed * (expected / 100)).toFixed(3)),
+        startedAt,
+        endedAt,
+        operator: plan.operator,
+        sampled: false,
+        remark: '首锅色泽不及，取部分产出返炙，原锅投料/产出保留',
+      });
+    }
+
+    const totals = summarizePots(allPots);
     const verdict = judgeDegree({
       method,
-      fireLevel: fireLevel as ProcessBatch['fireLevel'],
-      duration,
+      fireLevel: plan.fireLevel,
+      duration: plan.duration,
       temp: Math.round((method.tempRange[0] + method.tempRange[1]) / 2),
-      yieldRate,
+      yieldRate: totals.yieldRate,
     });
     const locked = index >= 2;
-    return {
-      id: `batch-${String(index + 1).padStart(3, '0')}`,
-      batchNo,
-      herbId,
-      methodId,
-      feedKg,
-      auxUsedKg,
-      fireLevel: fireLevel as ProcessBatch['fireLevel'],
-      startedAt,
-      endedAt,
-      yieldRate,
-      degree: verdict.degree,
-      operator,
+    const lastEnded = allPots.map((p) => p.endedAt).sort().at(-1)!;
+
+    batches.push({
+      id: batchId,
+      batchNo: plan.batchNo,
+      herbId: plan.herbId,
+      methodId: plan.methodId,
+      fireLevel: plan.fireLevel,
+      feedKg: totals.feedKg,
+      auxUsedKg: totals.auxUsedKg,
+      outputKg: totals.outputKg,
+      yieldRate: totals.yieldRate,
+      degree: verdict.degree as ProcessDegree,
+      operator: plan.operator,
       locked,
-      lockedAt: locked ? new Date(new Date(endedAt).getTime() + 30 * 60_000).toISOString() : undefined,
+      lockedAt: locked ? new Date(new Date(lastEnded).getTime() + 30 * 60_000).toISOString() : undefined,
       qcBy: locked ? '质检员 · 赵敏' : undefined,
-      remark,
-    };
+      potCount: allPots.length,
+      reworkCount: allPots.filter((p) => p.kind === 'rework').length,
+      startedAt: allPots.map((p) => p.startedAt).sort()[0],
+      endedAt: lastEnded,
+      version: 1,
+      remark: plan.remark,
+    });
+    pots.push(...allPots);
   });
+
+  return { batches, pots };
 }
 
-function buildSeedSamples(batches: ProcessBatch[]): RetainSample[] {
+function buildSeedSamples(batches: ProcessBatch[], pots: ProcessPot[]): RetainSample[] {
   const logs = (date: string, color: string, odor: string, mold: string, observer: string): RetainSample['observeLogs'][number] => ({
     id: `log-${date}-${Math.random().toString(36).slice(2, 7)}`,
     date,
@@ -100,10 +173,14 @@ function buildSeedSamples(batches: ProcessBatch[]): RetainSample[] {
   return batches.slice(0, 6).map((batch, index) => {
     const retainMonths = [6, 12, 18, 24][index % 4];
     const retainedAt = new Date(Date.now() - (index * 37 + 8) * 86_400_000).toISOString();
+    const batchPots = pots.filter((p) => p.batchId === batch.id);
+    // 默认从首锅留样；PZ-25085（index 4，两锅各 100kg）从第二锅留样，演示锅次来源差异
+    const sourcePot = batchPots[index === 4 ? 1 : 0];
     return {
       id: `sample-${String(index + 1).padStart(3, '0')}`,
-      sampleNo: `LY-${batch.batchNo}`,
+      sampleNo: `LY-${batch.batchNo}-${sourcePot.kind === 'rework' ? 'RW' : sourcePot.potNo}`,
       batchId: batch.id,
+      potId: sourcePot.id,
       amountG: [200, 300, 500][index % 3],
       retainMonths,
       cabinet: CABINETS[(index * 5) % CABINETS.length],
@@ -125,21 +202,36 @@ export async function seedIfEmpty(): Promise<void> {
   const herbCount = await db.herbs.count();
   const methodCount = await db.methods.count();
   const batchCount = await db.batches.count();
+  const potCount = await db.pots.count();
   const sampleCount = await db.samples.count();
 
-  await db.transaction('rw', db.herbs, db.methods, db.batches, db.samples, db.meta, async () => {
+  await db.transaction('rw', [db.herbs, db.methods, db.batches, db.pots, db.samples, db.meta], async () => {
     if (herbCount === 0) {
       await db.herbs.bulkPut(SEED_HERBS.filter((h) => HERB_ORIGINS.includes(h.origin)));
     }
     if (methodCount === 0) {
       await db.methods.bulkPut(SEED_METHODS.filter((m) => METHOD_NAMES.includes(m.name)));
     }
-    const batches = buildSeedBatches();
+    const { batches, pots } = buildSeedBatchesAndPots();
     if (batchCount === 0) {
       await db.batches.bulkPut(batches);
     }
-    if (sampleCount === 0) {
-      await db.samples.bulkPut(buildSeedSamples(batches));
+    if (potCount === 0 && batchCount === 0) {
+      await db.pots.bulkPut(pots);
+    }
+    if (sampleCount === 0 && batchCount === 0) {
+      const samples = buildSeedSamples(batches, pots);
+      // 留样锅次回写冻结标记
+      const frozen = new Set(samples.map((s) => s.potId));
+      await db.pots.toCollection().modify((pot) => {
+        if (frozen.has(pot.id)) {
+          pot.sampled = true;
+        }
+      });
+      pots.forEach((p) => {
+        if (frozen.has(p.id)) p.sampled = true;
+      });
+      await db.samples.bulkPut(samples);
     }
     await db.meta.put({ key: 'seeded', value: new Date().toISOString() });
   });
@@ -147,8 +239,8 @@ export async function seedIfEmpty(): Promise<void> {
 
 /** 清空全部本地数据（用于重置演示环境） */
 export async function resetAll(): Promise<void> {
-  await db.transaction('rw', db.herbs, db.methods, db.batches, db.samples, db.meta, async () => {
-    await Promise.all([db.herbs.clear(), db.methods.clear(), db.batches.clear(), db.samples.clear(), db.meta.clear()]);
+  await db.transaction('rw', [db.herbs, db.methods, db.batches, db.pots, db.samples, db.meta], async () => {
+    await Promise.all([db.herbs.clear(), db.methods.clear(), db.batches.clear(), db.pots.clear(), db.samples.clear(), db.meta.clear()]);
   });
   await seedIfEmpty();
 }

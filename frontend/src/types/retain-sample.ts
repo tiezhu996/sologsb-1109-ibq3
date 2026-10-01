@@ -22,6 +22,8 @@ export interface RetainSample {
   sampleNo: string;
   /** 关联炮制批次 */
   batchId: string;
+  /** 来源锅次 id（留样追溯到具体锅次） */
+  potId: string;
   /** 留样量（g） */
   amountG: number;
   /** 留样期（月） */

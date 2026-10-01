@@ -13,7 +13,9 @@ import { seedIfEmpty } from './utils/seed';
 import { useHerbStore } from './stores/herbStore';
 import { useMethodStore } from './stores/methodStore';
 import { useBatchStore } from './stores/batchStore';
+import { usePotStore } from './stores/potStore';
 import { useSampleStore } from './stores/sampleStore';
+import { onStoreChange } from './utils/sync';
 import { downloadText, exportBackupJson } from './utils/export';
 
 const { Header, Sider, Content, Footer } = Layout;
@@ -34,6 +36,7 @@ export default function App() {
   const hydrateHerbs = useHerbStore((s) => s.hydrate);
   const hydrateMethods = useMethodStore((s) => s.hydrate);
   const hydrateBatches = useBatchStore((s) => s.hydrate);
+  const hydratePots = usePotStore((s) => s.hydrate);
   const hydrateSamples = useSampleStore((s) => s.hydrate);
   const location = useLocation();
 
@@ -42,7 +45,7 @@ export default function App() {
     (async () => {
       try {
         await seedIfEmpty();
-        await Promise.all([hydrateHerbs(), hydrateMethods(), hydrateBatches(), hydrateSamples()]);
+        await Promise.all([hydrateHerbs(), hydrateMethods(), hydrateBatches(), hydratePots(), hydrateSamples()]);
       } catch (error) {
         message.error(`本地数据装载失败：${(error as Error).message}`);
       } finally {
@@ -54,7 +57,24 @@ export default function App() {
     return () => {
       alive = false;
     };
-  }, [hydrateHerbs, hydrateMethods, hydrateBatches, hydrateSamples, message]);
+  }, [hydrateHerbs, hydrateMethods, hydrateBatches, hydratePots, hydrateSamples, message]);
+
+  // 其他标签页提交锅次/留样后，本页按最新数据重新装载，避免按旧余量分锅
+  useEffect(() => {
+    const reload = async () => {
+      await Promise.all([hydrateBatches(), hydratePots(), hydrateSamples()]);
+    };
+    const dispose = onStoreChange((msg) => {
+      if (msg === 'pots-changed') {
+        void Promise.all([hydrateBatches(), hydratePots()]);
+      } else if (msg === 'samples-changed') {
+        void hydrateSamples();
+      } else {
+        void reload();
+      }
+    });
+    return dispose;
+  }, [hydrateBatches, hydratePots, hydrateSamples]);
 
   const selectedKey = MENU_ITEMS.map((item) => item.key)
     .filter((key) => (key === '/' ? location.pathname === '/' : location.pathname.startsWith(key)))
