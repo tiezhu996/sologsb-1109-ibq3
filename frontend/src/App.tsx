@@ -10,9 +10,11 @@ import {
 } from '@ant-design/icons';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { seedIfEmpty } from './utils/seed';
+import { onStoreChange } from './utils/sync';
 import { useHerbStore } from './stores/herbStore';
 import { useMethodStore } from './stores/methodStore';
 import { useBatchStore } from './stores/batchStore';
+import { usePotStore } from './stores/potStore';
 import { useSampleStore } from './stores/sampleStore';
 import { downloadText, exportBackupJson } from './utils/export';
 
@@ -34,6 +36,7 @@ export default function App() {
   const hydrateHerbs = useHerbStore((s) => s.hydrate);
   const hydrateMethods = useMethodStore((s) => s.hydrate);
   const hydrateBatches = useBatchStore((s) => s.hydrate);
+  const hydratePots = usePotStore((s) => s.hydrate);
   const hydrateSamples = useSampleStore((s) => s.hydrate);
   const location = useLocation();
 
@@ -42,7 +45,7 @@ export default function App() {
     (async () => {
       try {
         await seedIfEmpty();
-        await Promise.all([hydrateHerbs(), hydrateMethods(), hydrateBatches(), hydrateSamples()]);
+        await Promise.all([hydrateHerbs(), hydrateMethods(), hydrateBatches(), hydratePots(), hydrateSamples()]);
       } catch (error) {
         message.error(`本地数据装载失败：${(error as Error).message}`);
       } finally {
@@ -54,7 +57,21 @@ export default function App() {
     return () => {
       alive = false;
     };
-  }, [hydrateHerbs, hydrateMethods, hydrateBatches, hydrateSamples, message]);
+  }, [hydrateHerbs, hydrateMethods, hydrateBatches, hydratePots, hydrateSamples, message]);
+
+  // 其他标签页提交分锅/留样后，本标签页重新水合，确保余量与版本号是最新的
+  useEffect(() => {
+    const hydrators = {
+      herbs: useHerbStore.getState().hydrate,
+      methods: useMethodStore.getState().hydrate,
+      batches: useBatchStore.getState().hydrate,
+      pots: usePotStore.getState().hydrate,
+      samples: useSampleStore.getState().hydrate,
+    };
+    return onStoreChange((kind) => {
+      void hydrators[kind]();
+    });
+  }, []);
 
   const selectedKey = MENU_ITEMS.map((item) => item.key)
     .filter((key) => (key === '/' ? location.pathname === '/' : location.pathname.startsWith(key)))

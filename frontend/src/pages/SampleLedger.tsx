@@ -7,8 +7,10 @@ import CabinetGrid from '../components/common/CabinetGrid';
 import EmptyPanel from '../components/common/EmptyPanel';
 import { useSampleStore } from '../stores/sampleStore';
 import { useBatchStore } from '../stores/batchStore';
+import { usePotStore } from '../stores/potStore';
 import { useHerbStore } from '../stores/herbStore';
 import { CABINETS, type ObserveLog, type RetainSample, type SampleExpiry } from '../types/retain-sample';
+import { POT_KIND_LABEL } from '../types/process-batch';
 import { buildExpiryList, formatDate, todayStr } from '../utils/degree';
 
 const { Title, Paragraph, Text } = Typography;
@@ -16,6 +18,7 @@ const { Title, Paragraph, Text } = Typography;
 interface SampleFormValues {
   sampleNo: string;
   batchId: string;
+  potId: string;
   amountG: number;
   retainMonths: number;
   cabinet: string;
@@ -33,7 +36,7 @@ interface ObserveFormValues {
 
 const STATE_COLOR: Record<SampleExpiry['state'], string> = { 已到期: 'red', 临期: 'orange', 观察中: 'green' };
 
-/** 留样与观察台账：按柜位网格查看并追加观察记录 */
+/** 留样与观察台账：留样来源精确到锅次，按柜位网格查看并追加观察记录 */
 export default function SampleLedger() {
   const { message } = AntApp.useApp();
   const samples = useSampleStore((s) => s.samples);
@@ -41,6 +44,7 @@ export default function SampleLedger() {
   const removeSample = useSampleStore((s) => s.removeSample);
   const appendObserveLog = useSampleStore((s) => s.appendObserveLog);
   const batches = useBatchStore((s) => s.batches);
+  const pots = usePotStore((s) => s.pots);
   const herbs = useHerbStore((s) => s.herbs);
 
   const [selectedCabinet, setSelectedCabinet] = useState<string | undefined>(undefined);
@@ -58,20 +62,36 @@ export default function SampleLedger() {
     [expiryList, selectedCabinet],
   );
 
-  const batchLabel = (batchId: string) => {
-    const batch = batches.find((b) => b.id === batchId);
-    if (!batch) return '未知批次';
-    const herb = herbs.find((h) => h.id === batch.herbId);
-    return `${batch.batchNo} · ${herb?.name ?? '未知药材'} · 得率 ${batch.yieldRate}%`;
+  const potOf = (potId: string) => pots.find((p) => p.id === potId);
+  const batchOf = (batchId: string) => batches.find((b) => b.id === batchId);
+
+  const sampleSourceLabel = (sample: RetainSample) => {
+    const batch = batchOf(sample.batchId);
+    const herb = herbs.find((h) => h.id === batch?.herbId);
+    const pot = potOf(sample.potId);
+    const batchText = batch ? `${batch.batchNo} · ${herb?.name ?? '未知药材'}` : '未知批次';
+    if (!pot) {
+      // 兼容历史数据：锅次记录缺失时仍标出 potId
+      return `${batchText} · 来源锅 ${sample.potId ?? '缺失'}`;
+    }
+    return `${batchText} · 第 ${pot.seq} 锅（${POT_KIND_LABEL[pot.kind]}，投料 ${pot.feedKg}kg / 产出 ${pot.outputKg}kg）`;
   };
+
+  const formBatchId = Form.useWatch('batchId', form);
+  const formPots = useMemo(
+    () => pots.filter((p) => p.batchId === formBatchId).sort((a, b) => a.seq - b.seq),
+    [pots, formBatchId],
+  );
 
   const openCreate = () => {
     const nextIndex = samples.length + 1;
     const batch = batches[0];
+    const firstPots = batch ? pots.filter((p) => p.batchId === batch.id).sort((a, b) => a.seq - b.seq) : [];
     form.resetFields();
     form.setFieldsValue({
       sampleNo: `LY-${batch?.batchNo ?? 'NEW'}-${String(nextIndex).padStart(2, '0')}`,
       batchId: batch?.id,
+      potId: firstPots[0]?.id,
       amountG: 300,
       retainMonths: 12,
       cabinet: CABINETS.find((c) => !expiryList.some((item) => item.sample.cabinet === c)) ?? CABINETS[0],
@@ -82,6 +102,10 @@ export default function SampleLedger() {
 
   const submit = async () => {
     const values = await form.validateFields();
+    if (!values.potId) {
+      message.error('请选择留样来源锅次');
+      return;
+    }
     const occupied = expiryList.some((item) => item.sample.cabinet === values.cabinet);
     if (occupied) {
       message.warning(`柜位 ${values.cabinet} 已有留样，仍将并存放置`);
@@ -89,12 +113,14 @@ export default function SampleLedger() {
     await createSample({
       sampleNo: values.sampleNo,
       batchId: values.batchId,
+      potId: values.potId,
       amountG: values.amountG,
       retainMonths: values.retainMonths,
       cabinet: values.cabinet,
       retainedAt: values.retainedAt.toISOString(),
     });
-    message.success(`已登记留样 ${values.sampleNo}`);
+    const pot = potOf(values.potId);
+    message.success(`已登记留样 ${values.sampleNo}，来源：第 ${pot?.seq ?? '?'} 锅；该锅投料与产出已冻结`);
     setOpen(false);
   };
 
@@ -124,7 +150,7 @@ export default function SampleLedger() {
 
   const columns: TableColumnsType<SampleExpiry> = [
     { title: '留样编号', width: 170, render: (_, row) => <Text strong>{row.sample.sampleNo}</Text> },
-    { title: '关联批次', width: 260, render: (_, row) => batchLabel(row.sample.batchId) },
+    { title: '来源锅次', width: 340, render: (_, row) => sampleSourceLabel(row.sample) },
     { title: '留样量(g)', width: 100, align: 'right', render: (_, row) => row.sample.amountG },
     { title: '留样期(月)', width: 100, align: 'right', render: (_, row) => row.sample.retainMonths },
     { title: '柜位', width: 80, render: (_, row) => <Tag color="green">{row.sample.cabinet}</Tag> },
@@ -151,7 +177,11 @@ export default function SampleLedger() {
           <Button size="small" type="link" onClick={() => openObserve(row.sample)}>
             追加观察
           </Button>
-          <Popconfirm title={`确认删除留样 ${row.sample.sampleNo}？`} onConfirm={() => removeSample(row.sample.id).then(() => message.success('已删除'))}>
+          <Popconfirm
+            title={`确认删除留样 ${row.sample.sampleNo}？`}
+            description="若该锅无其他留样，锅次将解除冻结"
+            onConfirm={() => removeSample(row.sample.id).then(() => message.success('已删除，锅次留样状态已同步'))}
+          >
             <Button size="small" type="link" danger>
               删除
             </Button>
@@ -175,7 +205,9 @@ export default function SampleLedger() {
       <Title level={3} style={{ marginBottom: 4 }}>
         留样与观察台账
       </Title>
-      <Paragraph type="secondary">按柜位网格查看占用与到期状态，观察记录按日期追加；到期前 30 天进入提醒清单。</Paragraph>
+      <Paragraph type="secondary">
+        留样来源精确到炮制锅次，登记留样后该锅投料、辅料与产出即冻结，只能新增返工锅次；按柜位网格查看占用与到期状态，观察记录按日期追加；到期前 30 天进入提醒清单。
+      </Paragraph>
 
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col xs={12} md={6}>
@@ -212,16 +244,48 @@ export default function SampleLedger() {
       {visible.length === 0 ? (
         <EmptyPanel description={selectedCabinet ? `柜位 ${selectedCabinet} 暂无留样` : '暂无留样记录'} actionText="登记留样" onAction={openCreate} />
       ) : (
-        <Table rowKey={(row) => row.sample.id} size="small" columns={columns} dataSource={visible} pagination={{ pageSize: 8 }} scroll={{ x: 1400 }} />
+        <Table rowKey={(row) => row.sample.id} size="small" columns={columns} dataSource={visible} pagination={{ pageSize: 8 }} scroll={{ x: 1500 }} />
       )}
 
-      <Modal open={open} title="登记留样" onCancel={() => setOpen(false)} onOk={submit} okText="保存" cancelText="取消" width={560}>
-        <Form form={form} layout="vertical">
+      <Modal open={open} title="登记留样" onCancel={() => setOpen(false)} onOk={submit} okText="保存并冻结来源锅" cancelText="取消" width={600}>
+        <Form
+          form={form}
+          layout="vertical"
+          onValuesChange={(changed) => {
+            // 切换批次时，来源锅次级联到该批第一锅，并同步留样编号
+            if ('batchId' in changed) {
+              const firstPot = pots
+                .filter((p) => p.batchId === changed.batchId)
+                .sort((a, b) => a.seq - b.seq)[0];
+              const batch = batchOf(changed.batchId as string);
+              form.setFieldsValue({
+                potId: firstPot?.id,
+                sampleNo: `LY-${batch?.batchNo ?? 'NEW'}-${String(samples.length + 1).padStart(2, '0')}`,
+              } as unknown as SampleFormValues);
+            }
+          }}
+        >
           <Form.Item name="sampleNo" label="留样编号" rules={[{ required: true, message: '请输入留样编号' }]}>
             <Input maxLength={32} />
           </Form.Item>
           <Form.Item name="batchId" label="关联炮制批次" rules={[{ required: true, message: '请选择关联批次' }]}>
-            <Select showSearch optionFilterProp="label" options={batches.map((b) => ({ label: batchLabel(b.id), value: b.id }))} />
+            <Select
+              showSearch
+              optionFilterProp="label"
+              options={batches.map((b) => {
+                const herb = herbs.find((h) => h.id === b.herbId);
+                return { label: `${b.batchNo} · ${herb?.name ?? '未知药材'} · 得率 ${b.yieldRate}%`, value: b.id };
+              })}
+            />
+          </Form.Item>
+          <Form.Item name="potId" label="来源锅次（留样后该锅冻结）" rules={[{ required: true, message: '请选择来源锅次' }]}>
+            <Select
+              options={formPots.map((p) => ({
+                label: `第 ${p.seq} 锅 · ${POT_KIND_LABEL[p.kind]} · 投料 ${p.feedKg}kg / 产出 ${p.outputKg}kg${p.retained ? '（已留样）' : ''}`,
+                value: p.id,
+              }))}
+              placeholder={formBatchId ? undefined : '请先选择批次'}
+            />
           </Form.Item>
           <Space size={12} style={{ display: 'flex' }} align="start">
             <Form.Item name="amountG" label="留样量(g)" rules={[{ required: true, message: '请输入留样量' }]}>
@@ -247,6 +311,11 @@ export default function SampleLedger() {
         footer={null}
         width={760}
       >
+        {observeTarget ? (
+          <Paragraph type="secondary" style={{ marginBottom: 12 }}>
+            来源：{sampleSourceLabel(observeTarget)}
+          </Paragraph>
+        ) : null}
         <Table
           rowKey="id"
           size="small"

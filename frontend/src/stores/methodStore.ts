@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { db } from '../utils/db';
 import { uid } from '../utils/id';
+import { broadcastChange } from '../utils/sync';
 import type { Auxiliary, CriterionDimension, FireLevel, MethodName, ProcessingMethod } from '../types/processing-method';
 
 export interface MethodInput {
@@ -54,6 +55,7 @@ export const useMethodStore = create<MethodState>()((set, get) => ({
     };
     await db.methods.put(method);
     set({ methods: [...get().methods, method] });
+    broadcastChange('methods');
     return method;
   },
 
@@ -65,11 +67,13 @@ export const useMethodStore = create<MethodState>()((set, get) => ({
     const next: ProcessingMethod = { ...current, ...patch };
     await db.methods.put(next);
     set({ methods: get().methods.map((m) => (m.id === id ? next : m)) });
+    broadcastChange('methods');
   },
 
   removeMethod: async (id) => {
     await db.methods.delete(id);
     set({ methods: get().methods.filter((m) => m.id !== id) });
+    broadcastChange('methods');
   },
 
   deriveMethod: async (sourceId, name, auxRatio) => {

@@ -7,15 +7,17 @@ export interface BackupPayload {
   herbs: unknown[];
   methods: unknown[];
   batches: unknown[];
+  pots: unknown[];
   samples: unknown[];
 }
 
 /** 汇总全部本地表为 JSON 备份（schema 迁移前先导出） */
 export async function buildBackup(): Promise<BackupPayload> {
-  const [herbs, methods, batches, samples] = await Promise.all([
+  const [herbs, methods, batches, pots, samples] = await Promise.all([
     db.herbs.toArray(),
     db.methods.toArray(),
     db.batches.toArray(),
+    db.pots.toArray(),
     db.samples.toArray(),
   ]);
   return {
@@ -25,6 +27,7 @@ export async function buildBackup(): Promise<BackupPayload> {
     herbs,
     methods,
     batches,
+    pots,
     samples,
   };
 }
@@ -51,11 +54,11 @@ export function downloadCsv<T extends Record<string, unknown>>(filename: string,
   const body = rows
     .map((row) => columns.map((c) => `"${String(row[c.key] ?? '').replace(/"/g, '""')}"`).join(','))
     .join('\n');
-  downloadText(filename, `\ufeff${header}\n${body}`, 'text/csv');
+  downloadText(filename, `﻿${header}\n${body}`, 'text/csv');
 }
 
 /** 恢复 JSON 备份 */
-export async function importBackup(text: string): Promise<{ herbs: number; methods: number; batches: number; samples: number }> {
+export async function importBackup(text: string): Promise<{ herbs: number; methods: number; batches: number; pots: number; samples: number }> {
   const payload = JSON.parse(text) as Partial<BackupPayload>;
   if (!payload || payload.app !== 'gbherbprocess') {
     throw new Error('备份文件格式不匹配（缺少 app=gbherbprocess 标记）');
@@ -64,18 +67,21 @@ export async function importBackup(text: string): Promise<{ herbs: number; metho
     herbs: payload.herbs?.length ?? 0,
     methods: payload.methods?.length ?? 0,
     batches: payload.batches?.length ?? 0,
+    pots: payload.pots?.length ?? 0,
     samples: payload.samples?.length ?? 0,
   };
-  await db.transaction('rw', db.herbs, db.methods, db.batches, db.samples, async () => {
+  await db.transaction('rw', db.herbs, db.methods, db.batches, db.pots, db.samples, async () => {
     await Promise.all([
       db.herbs.clear(),
       db.methods.clear(),
       db.batches.clear(),
+      db.pots.clear(),
       db.samples.clear(),
     ]);
     if (payload.herbs?.length) await db.herbs.bulkPut(payload.herbs as never[]);
     if (payload.methods?.length) await db.methods.bulkPut(payload.methods as never[]);
     if (payload.batches?.length) await db.batches.bulkPut(payload.batches as never[]);
+    if (payload.pots?.length) await db.pots.bulkPut(payload.pots as never[]);
     if (payload.samples?.length) await db.samples.bulkPut(payload.samples as never[]);
   });
   return counts;

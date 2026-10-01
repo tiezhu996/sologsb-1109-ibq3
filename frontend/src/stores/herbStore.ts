@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { db } from '../utils/db';
 import { uid } from '../utils/id';
+import { broadcastChange } from '../utils/sync';
 import type { HerbGroupSummary, HerbMaterial, HerbOrigin, HerbPart } from '../types/herb-material';
 
 export interface HerbInput {
@@ -46,6 +47,7 @@ export const useHerbStore = create<HerbState>()((set, get) => ({
     };
     await db.herbs.put(herb);
     set({ herbs: [herb, ...get().herbs] });
+    broadcastChange('herbs');
     return herb;
   },
 
@@ -57,11 +59,13 @@ export const useHerbStore = create<HerbState>()((set, get) => ({
     const next: HerbMaterial = { ...current, ...patch, feedKg: patch.feedKg !== undefined ? Number(patch.feedKg) : current.feedKg };
     await db.herbs.put(next);
     set({ herbs: get().herbs.map((h) => (h.id === id ? next : h)) });
+    broadcastChange('herbs');
   },
 
   removeHerb: async (id) => {
     await db.herbs.delete(id);
     set({ herbs: get().herbs.filter((h) => h.id !== id) });
+    broadcastChange('herbs');
   },
 
   groupSummary: () => {

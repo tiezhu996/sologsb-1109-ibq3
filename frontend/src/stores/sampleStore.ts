@@ -1,12 +1,15 @@
 import { create } from 'zustand';
 import { db } from '../utils/db';
 import { uid } from '../utils/id';
+import { broadcastChange } from '../utils/sync';
 import { buildExpiryList, dueSamples, todayStr } from '../utils/degree';
 import type { ObserveLog, RetainSample, SampleExpiry } from '../types/retain-sample';
 
 export interface SampleInput {
   sampleNo: string;
   batchId: string;
+  /** 来源锅次（留样精确到锅，留样后该锅冻结） */
+  potId: string;
   amountG: number;
   retainMonths: number;
   cabinet: string;
@@ -26,8 +29,9 @@ interface SampleState {
   samples: RetainSample[];
   hydrated: boolean;
   hydrate: () => Promise<void>;
+  /** 登记留样：标记来源锅次留样（冻结该锅投料/产出） */
   createSample: (input: SampleInput) => Promise<RetainSample>;
-  updateSample: (id: string, patch: Partial<SampleInput>) => Promise<void>;
+  updateSample: (id: string, patch: Partial<Omit<SampleInput, 'potId'>>) => Promise<void>;
   removeSample: (id: string) => Promise<void>;
   /** 观察记录按日期追加 */
   appendObserveLog: (sampleId: string, input: ObserveInput) => Promise<void>;
@@ -52,14 +56,24 @@ export const useSampleStore = create<SampleState>()((set, get) => ({
       id: uid('sample'),
       sampleNo: input.sampleNo.trim(),
       batchId: input.batchId,
+      potId: input.potId,
       amountG: Number(input.amountG) || 0,
       retainMonths: Number(input.retainMonths) || 6,
       cabinet: input.cabinet,
       retainedAt: input.retainedAt ?? new Date().toISOString(),
       observeLogs: [],
     };
-    await db.samples.put(sample);
+    // 留样台账与来源锅次的留样标记在同一事务内提交
+    await db.transaction('rw', db.samples, db.pots, async () => {
+      await db.samples.put(sample);
+      const pot = await db.pots.get(input.potId);
+      if (pot && !pot.retained) {
+        await db.pots.put({ ...pot, retained: true });
+      }
+    });
     set({ samples: [...get().samples, sample] });
+    broadcastChange('samples');
+    broadcastChange('pots');
     return sample;
   },
 
@@ -71,11 +85,28 @@ export const useSampleStore = create<SampleState>()((set, get) => ({
     const next: RetainSample = { ...current, ...patch };
     await db.samples.put(next);
     set({ samples: get().samples.map((s) => (s.id === id ? next : s)) });
+    broadcastChange('samples');
   },
 
   removeSample: async (id) => {
-    await db.samples.delete(id);
+    const current = get().samples.find((s) => s.id === id);
+    if (!current) {
+      return;
+    }
+    // 若该锅再无其他留样，则解除锅次冻结
+    await db.transaction('rw', db.samples, db.pots, async () => {
+      await db.samples.delete(id);
+      const others = await db.samples.where('potId').equals(current.potId).count();
+      if (others === 0) {
+        const pot = await db.pots.get(current.potId);
+        if (pot?.retained) {
+          await db.pots.put({ ...pot, retained: false });
+        }
+      }
+    });
     set({ samples: get().samples.filter((s) => s.id !== id) });
+    broadcastChange('samples');
+    broadcastChange('pots');
   },
 
   appendObserveLog: async (sampleId, input) => {
@@ -96,6 +127,7 @@ export const useSampleStore = create<SampleState>()((set, get) => ({
     const next: RetainSample = { ...current, observeLogs: logs };
     await db.samples.put(next);
     set({ samples: get().samples.map((s) => (s.id === sampleId ? next : s)) });
+    broadcastChange('samples');
   },
 
   expiryList: (warnDays = 30) => buildExpiryList(get().samples, warnDays),

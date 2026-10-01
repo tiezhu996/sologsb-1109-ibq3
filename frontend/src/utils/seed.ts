@@ -1,9 +1,10 @@
 import { db } from './db';
 import { HERB_ORIGINS, type HerbMaterial } from '../types/herb-material';
 import { METHOD_NAMES, type ProcessingMethod } from '../types/processing-method';
-import type { ProcessBatch } from '../types/process-batch';
+import type { ProcessBatch, ProcessPot } from '../types/process-batch';
 import { CABINETS, type RetainSample } from '../types/retain-sample';
 import { judgeDegree, expectedYieldOf } from './degree';
+import { applyPotSummary, round2, splitFeedByCapacity } from './pots';
 
 /** 首次打开时写入的示例台账，便于直接查看各页面效果 */
 export const SEED_HERBS: HerbMaterial[] = [
@@ -38,56 +39,107 @@ function isoMinutesAgo(minutes: number): string {
   return new Date(Date.now() - minutes * 60_000).toISOString();
 }
 
-function buildSeedBatches(): ProcessBatch[] {
-  const plan: Array<[string, string, string, number, number, number, string, string, string]> = [
-    // batchNo, herbId, methodId, feedKg, auxUsedKg, durationMin, fireLevel, operator, remark
-    ['PZ-25081', 'herb-001', 'method-002', 120, 12, 10, '中火', '陈玉兰', '麸炒白术'],
-    ['PZ-25082', 'herb-002', 'method-003', 80, 8, 15, '文火', '陈玉兰', '酒炙白芍'],
-    ['PZ-25083', 'herb-003', 'method-003', 60, 6, 15, '文火', '刘建国', '酒炙当归'],
-    ['PZ-25084', 'herb-004', 'method-001', 45, 0, 12, '文火', '刘建国', '清炒陈皮'],
-    ['PZ-25085', 'herb-005', 'method-006', 200, 50, 16, '中火', '王丽', '蜜炙黄芪'],
-    ['PZ-25086', 'herb-006', 'method-010', 150, 0, 45, '武火', '王丽', '煅牡蛎'],
-    ['PZ-25087', 'herb-008', 'method-005', 90, 1.8, 12, '文火', '陈玉兰', '盐炙杜仲'],
-    ['PZ-25088', 'herb-009', 'method-001', 55, 0, 12, '文火', '刘建国', '清炒桑叶'],
-    ['PZ-25089', 'herb-010', 'method-006', 130, 32.5, 16, '中火', '王丽', '蜜炙甘草'],
-    ['PZ-25090', 'herb-007', 'method-002', 12, 1.2, 10, '中火', '王丽', '麸炒全蝎'],
-  ];
-
-  return plan.map(([batchNo, herbId, methodId, feedKg, auxUsedKg, duration, fireLevel, operator, remark], index) => {
-    const method = SEED_METHODS.find((m) => m.id === methodId)!;
-    const endedAt = isoMinutesAgo(45 * (index + 1));
-    const startedAt = new Date(new Date(endedAt).getTime() - duration * 60_000).toISOString();
-    const yieldRate = Number((expectedYieldOf(method) + ((index % 5) - 2) * 0.8).toFixed(1));
-    const verdict = judgeDegree({
-      method,
-      fireLevel: fireLevel as ProcessBatch['fireLevel'],
-      duration,
-      temp: Math.round((method.tempRange[0] + method.tempRange[1]) / 2),
-      yieldRate,
-    });
-    const locked = index >= 2;
-    return {
-      id: `batch-${String(index + 1).padStart(3, '0')}`,
-      batchNo,
-      herbId,
-      methodId,
-      feedKg,
-      auxUsedKg,
-      fireLevel: fireLevel as ProcessBatch['fireLevel'],
-      startedAt,
-      endedAt,
-      yieldRate,
-      degree: verdict.degree,
-      operator,
-      locked,
-      lockedAt: locked ? new Date(new Date(endedAt).getTime() + 30 * 60_000).toISOString() : undefined,
-      qcBy: locked ? '质检员 · 赵敏' : undefined,
-      remark,
-    };
-  });
+interface SeedPlan {
+  /** batchNo, herbId, methodId, feedKg, durationMin, fireLevel, operator, remark, potCapacityKg */
+  batchNo: string;
+  herbId: string;
+  methodId: string;
+  feedKg: number;
+  duration: number;
+  fireLevel: ProcessPot['fireLevel'];
+  operator: string;
+  remark: string;
+  capacityKg: number;
 }
 
-function buildSeedSamples(batches: ProcessBatch[]): RetainSample[] {
+const SEED_PLAN: SeedPlan[] = [
+  { batchNo: 'PZ-25081', herbId: 'herb-001', methodId: 'method-002', feedKg: 120, duration: 10, fireLevel: '中火', operator: '陈玉兰', remark: '麸炒白术', capacityKg: 50 },
+  { batchNo: 'PZ-25082', herbId: 'herb-002', methodId: 'method-003', feedKg: 80, duration: 15, fireLevel: '文火', operator: '陈玉兰', remark: '酒炙白芍', capacityKg: 80 },
+  { batchNo: 'PZ-25083', herbId: 'herb-003', methodId: 'method-003', feedKg: 60, duration: 15, fireLevel: '文火', operator: '刘建国', remark: '酒炙当归', capacityKg: 40 },
+  { batchNo: 'PZ-25084', herbId: 'herb-004', methodId: 'method-001', feedKg: 45, duration: 12, fireLevel: '文火', operator: '刘建国', remark: '清炒陈皮', capacityKg: 45 },
+  { batchNo: 'PZ-25085', herbId: 'herb-005', methodId: 'method-006', feedKg: 200, duration: 16, fireLevel: '中火', operator: '王丽', remark: '蜜炙黄芪', capacityKg: 60 },
+  { batchNo: 'PZ-25086', herbId: 'herb-006', methodId: 'method-010', feedKg: 150, duration: 45, fireLevel: '武火', operator: '王丽', remark: '煅牡蛎', capacityKg: 50 },
+  { batchNo: 'PZ-25087', herbId: 'herb-008', methodId: 'method-005', feedKg: 90, duration: 12, fireLevel: '文火', operator: '陈玉兰', remark: '盐炙杜仲', capacityKg: 45 },
+  { batchNo: 'PZ-25088', herbId: 'herb-009', methodId: 'method-001', feedKg: 55, duration: 12, fireLevel: '文火', operator: '刘建国', remark: '清炒桑叶', capacityKg: 55 },
+  { batchNo: 'PZ-25089', herbId: 'herb-010', methodId: 'method-006', feedKg: 130, duration: 16, fireLevel: '中火', operator: '王丽', remark: '蜜炙甘草', capacityKg: 50 },
+  { batchNo: 'PZ-25090', herbId: 'herb-007', methodId: 'method-002', feedKg: 12, duration: 10, fireLevel: '中火', operator: '王丽', remark: '麸炒全蝎', capacityKg: 30 },
+];
+
+/** 由炮制计划生成「锅次 + 汇总批次」示例数据，体现受锅容量限制的分批炮制 */
+function buildSeedPotsAndBatches(): { batches: ProcessBatch[]; pots: ProcessPot[] } {
+  const batches: ProcessBatch[] = [];
+  const pots: ProcessPot[] = [];
+
+  SEED_PLAN.forEach((plan, index) => {
+    const method = SEED_METHODS.find((m) => m.id === plan.methodId)!;
+    const batchId = `batch-${String(index + 1).padStart(3, '0')}`;
+    const feeds = splitFeedByCapacity(plan.feedKg, plan.capacityKg);
+    const expected = expectedYieldOf(method);
+    const batchEndedAt = isoMinutesAgo(45 * (index + 1));
+    const batchEndMs = new Date(batchEndedAt).getTime();
+
+    const batchPots: ProcessPot[] = feeds.map((feedKg, potIndex) => {
+      // 各锅得率在预期附近小幅波动，使批次汇总得率=总产出/总投料
+      const potYield = Number((expected + (((index + potIndex) % 5) - 2) * 0.8).toFixed(1));
+      const outputKg = round2(Number(((feedKg * potYield) / 100).toFixed(1)));
+      const auxUsedKg = round2(Number(((feedKg * method.auxRatio) / 100).toFixed(2)));
+      const endedAt = new Date(batchEndMs - (feeds.length - 1 - potIndex) * 5 * 60_000).toISOString();
+      const startedAt = new Date(new Date(endedAt).getTime() - plan.duration * 60_000).toISOString();
+      const verdict = judgeDegree({
+        method,
+        fireLevel: plan.fireLevel,
+        duration: plan.duration,
+        temp: Math.round((method.tempRange[0] + method.tempRange[1]) / 2),
+        yieldRate: potYield,
+      });
+      return {
+        id: `pot-${batchId}-${potIndex + 1}`,
+        batchId,
+        herbId: plan.herbId,
+        methodId: plan.methodId,
+        seq: potIndex + 1,
+        kind: 'normal',
+        capacityKg: plan.capacityKg,
+        feedKg,
+        auxUsedKg,
+        outputKg,
+        fireLevel: plan.fireLevel,
+        temp: Math.round((method.tempRange[0] + method.tempRange[1]) / 2),
+        duration: plan.duration,
+        startedAt,
+        endedAt,
+        degree: verdict.degree,
+        operator: plan.operator,
+        retained: false,
+        remark: potIndex === 0 ? plan.remark : undefined,
+      };
+    });
+
+    const batch: ProcessBatch = {
+      id: batchId,
+      batchNo: plan.batchNo,
+      herbId: plan.herbId,
+      methodId: plan.methodId,
+      feedKg: 0,
+      auxUsedKg: 0,
+      outputKg: 0,
+      yieldRate: 0,
+      degree: '适中',
+      startedAt: batchPots[0].startedAt,
+      endedAt: batchPots[batchPots.length - 1].endedAt,
+      potCount: batchPots.length,
+      potsVersion: 1,
+      remark: plan.remark,
+    };
+    batches.push(applyPotSummary(batch, batchPots));
+    pots.push(...batchPots);
+  });
+
+  return { batches, pots };
+}
+
+/** 前 6 批各从第一锅留样，回填锅次 retained 标记 */
+function buildSeedSamples(batches: ProcessBatch[], pots: ProcessPot[]): RetainSample[] {
   const logs = (date: string, color: string, odor: string, mold: string, observer: string): RetainSample['observeLogs'][number] => ({
     id: `log-${date}-${Math.random().toString(36).slice(2, 7)}`,
     date,
@@ -97,13 +149,16 @@ function buildSeedSamples(batches: ProcessBatch[]): RetainSample[] {
     observer,
   });
 
-  return batches.slice(0, 6).map((batch, index) => {
+  const samples = batches.slice(0, 6).map((batch, index) => {
     const retainMonths = [6, 12, 18, 24][index % 4];
     const retainedAt = new Date(Date.now() - (index * 37 + 8) * 86_400_000).toISOString();
+    const pot = pots.find((p) => p.batchId === batch.id && p.seq === 1)!;
+    pot.retained = true;
     return {
       id: `sample-${String(index + 1).padStart(3, '0')}`,
-      sampleNo: `LY-${batch.batchNo}`,
+      sampleNo: `LY-${batch.batchNo}-${pot.seq}`,
       batchId: batch.id,
+      potId: pot.id,
       amountG: [200, 300, 500][index % 3],
       retainMonths,
       cabinet: CABINETS[(index * 5) % CABINETS.length],
@@ -114,6 +169,7 @@ function buildSeedSamples(batches: ProcessBatch[]): RetainSample[] {
       ],
     };
   });
+  return samples;
 }
 
 /** 首次打开（表内无数据）时写入示例数据；已有数据则不动 */
@@ -127,19 +183,22 @@ export async function seedIfEmpty(): Promise<void> {
   const batchCount = await db.batches.count();
   const sampleCount = await db.samples.count();
 
-  await db.transaction('rw', db.herbs, db.methods, db.batches, db.samples, db.meta, async () => {
+  await db.transaction('rw', [db.herbs, db.methods, db.batches, db.pots, db.samples, db.meta], async () => {
     if (herbCount === 0) {
       await db.herbs.bulkPut(SEED_HERBS.filter((h) => HERB_ORIGINS.includes(h.origin)));
     }
     if (methodCount === 0) {
       await db.methods.bulkPut(SEED_METHODS.filter((m) => METHOD_NAMES.includes(m.name)));
     }
-    const batches = buildSeedBatches();
+    const { batches, pots } = buildSeedPotsAndBatches();
     if (batchCount === 0) {
       await db.batches.bulkPut(batches);
+      await db.pots.bulkPut(pots);
     }
     if (sampleCount === 0) {
-      await db.samples.bulkPut(buildSeedSamples(batches));
+      await db.samples.bulkPut(buildSeedSamples(batches, pots));
+      // 留样锅次的 retained 标记需要同步回 pots 表
+      await db.pots.bulkPut(pots);
     }
     await db.meta.put({ key: 'seeded', value: new Date().toISOString() });
   });
@@ -147,8 +206,8 @@ export async function seedIfEmpty(): Promise<void> {
 
 /** 清空全部本地数据（用于重置演示环境） */
 export async function resetAll(): Promise<void> {
-  await db.transaction('rw', db.herbs, db.methods, db.batches, db.samples, db.meta, async () => {
-    await Promise.all([db.herbs.clear(), db.methods.clear(), db.batches.clear(), db.samples.clear(), db.meta.clear()]);
+  await db.transaction('rw', [db.herbs, db.methods, db.batches, db.pots, db.samples, db.meta], async () => {
+    await Promise.all([db.herbs.clear(), db.methods.clear(), db.batches.clear(), db.pots.clear(), db.samples.clear(), db.meta.clear()]);
   });
   await seedIfEmpty();
 }
